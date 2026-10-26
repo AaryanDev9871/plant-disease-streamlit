@@ -18,12 +18,18 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "plant_disease_model.keras"
 CLASS_PATH = BASE_DIR / "class_names.json"
 MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# Model Registry mapped to your exact filenames
+MODEL_PATHS = {
+    "MobileNetV2": BASE_DIR / "plant_disease_model.keras",
+    "Custom CNN": BASE_DIR / "custom_cnn_best_validation_10epoch.keras",
+    "EfficientNetB0": BASE_DIR / "efficientnetb0_best_validation_10epoch.keras",
+}
+
 # ============================================================
-# CSS — keep this in st.markdown with unsafe_allow_html=True
+# CSS
 # ============================================================
 st.markdown(
     """
@@ -154,12 +160,11 @@ st.markdown(
         line-height: 1.8;
     }
 
-    /* Streamlit's two-column layout */
+    /* Streamlit layout */
     div[data-testid="stHorizontalBlock"] {
         gap: 24px;
     }
 
-    /* White panels created with st.container(border=True) */
     div[data-testid="stVerticalBlockBorderWrapper"] {
         background: #ffffff !important;
         border: 1px solid #e1e8dd !important;
@@ -352,10 +357,43 @@ st.markdown(
     }
 
     .prediction-name {
-        margin: 10px 0 27px;
+        margin: 8px 0 12px;
         overflow-wrap: anywhere;
         color: #26392b;
         font: 700 23px/1.4 "Manrope", sans-serif;
+    }
+
+    .model-badge {
+        display: inline-block;
+        margin-bottom: 20px;
+        padding: 4px 10px;
+        background: #edf4e9;
+        border-radius: 6px;
+        color: #3d6d45;
+        font-size: 11px;
+        font-weight: 700;
+    }
+
+    .compare-card {
+        padding: 14px;
+        margin-bottom: 12px;
+        border: 1px solid #e1e8dd;
+        border-radius: 12px;
+        background: #fafcf8;
+    }
+
+    .compare-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #2d4533;
+        margin-bottom: 4px;
+    }
+
+    .compare-pred {
+        font-size: 15px;
+        font-weight: 700;
+        color: #26392b;
+        margin-bottom: 8px;
     }
 
     .confidence-row {
@@ -455,13 +493,14 @@ st.markdown(
 # MODEL FUNCTIONS
 # ============================================================
 @st.cache_resource
-def load_model():
-    if not MODEL_PATH.exists():
+def load_model(model_name: str):
+    path = MODEL_PATHS.get(model_name)
+    if not path or not path.exists():
         raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH.name}. "
-            "Keep it in the same folder as app.py."
+            f"Model file for '{model_name}' not found at: {path}. "
+            "Please check that the file exists in your directory."
         )
-    return tf.keras.models.load_model(MODEL_PATH, compile=False)
+    return tf.keras.models.load_model(path, compile=False)
 
 
 @st.cache_data
@@ -485,13 +524,11 @@ def get_class_name(classes, index):
         if index in classes:
             return str(classes[index])
 
-    raise ValueError(
-        f"Class index {index} was not found in class_names.json."
-    )
+    raise ValueError(f"Class index {index} was not found in class_names.json.")
 
 
-def predict_image(image):
-    model = load_model()
+def predict_image(image, model_name: str):
+    model = load_model(model_name)
     classes = load_class_names()
 
     resized = image.convert("RGB").resize((224, 224))
@@ -508,21 +545,29 @@ def predict_image(image):
     return {
         "predicted_class": predicted_class,
         "confidence": confidence,
+        "model_used": model_name,
     }
+
+
+def predict_all_models(image):
+    results = {}
+    for name in MODEL_PATHS.keys():
+        results[name] = predict_image(image, name)
+    return results
 
 
 # ============================================================
 # SESSION STATE
 # ============================================================
-if "prediction" not in st.session_state:
-    st.session_state.prediction = None
+if "predictions_all" not in st.session_state:
+    st.session_state.predictions_all = None
 if "prediction_file" not in st.session_state:
     st.session_state.prediction_file = None
 if "upload_version" not in st.session_state:
     st.session_state.upload_version = 0
 
 # ============================================================
-# HEADER — st.html renders HTML instead of showing source code
+# HEADER
 # ============================================================
 st.html(
     """
@@ -551,8 +596,8 @@ st.html(
         </div>
         <h1>A healthier garden<br>starts with <span>one leaf.</span></h1>
         <p class="subtitle">
-            Upload a leaf photo to identify a possible plant disease using
-            our deep learning model.
+            Upload a leaf photo to analyze and compare predictions across multiple
+            deep learning architectures.
         </p>
     </div>
     """
@@ -570,11 +615,18 @@ with left:
             <div class="section-heading">
                 <div>
                     <div class="step-label">STEP 01</div>
-                    <h2>Upload a leaf image</h2>
+                    <h2>Upload Image & Select Active Model</h2>
                 </div>
                 <span class="file-type">JPG · PNG · WEBP</span>
             </div>
             """
+        )
+
+        selected_model = st.selectbox(
+            "Primary Model Selection",
+            options=list(MODEL_PATHS.keys()),
+            index=0,
+            key="model_selector",
         )
 
         uploaded = st.file_uploader(
@@ -591,7 +643,7 @@ with left:
         if uploaded is not None:
             if uploaded.size > MAX_SIZE:
                 st.error("Image size must be less than 10 MB.")
-                st.session_state.prediction = None
+                st.session_state.predictions_all = None
                 st.session_state.prediction_file = None
             else:
                 try:
@@ -599,7 +651,7 @@ with left:
                     valid_image = True
 
                     if st.session_state.prediction_file != uploaded.name:
-                        st.session_state.prediction = None
+                        st.session_state.predictions_all = None
                         st.session_state.prediction_file = None
 
                     st.image(image, use_container_width=True)
@@ -616,24 +668,24 @@ with left:
             key="predict_button",
         ):
             try:
-                with st.spinner("Analyzing your leaf..."):
-                    st.session_state.prediction = predict_image(image)
+                with st.spinner("Running predictions on all 3 models..."):
+                    st.session_state.predictions_all = predict_all_models(image)
                     st.session_state.prediction_file = uploaded.name
             except Exception as error:
-                st.session_state.prediction = None
+                st.session_state.predictions_all = None
                 st.error(f"Prediction failed: {error}")
 
         st.html(
             """
             <p class="privacy-note">
-                Image is processed by this app's prediction model.
+                Image is processed locally across MobileNetV2, Custom CNN, and EfficientNetB0.
             </p>
             """
         )
 
         if uploaded is not None:
             if st.button("Remove image", key="remove_button"):
-                st.session_state.prediction = None
+                st.session_state.predictions_all = None
                 st.session_state.prediction_file = None
                 st.session_state.upload_version += 1
                 st.rerun()
@@ -652,63 +704,102 @@ with right:
             """
         )
 
-        result = st.session_state.prediction
+        all_preds = st.session_state.predictions_all
 
-        if result is None:
+        if all_preds is None:
             st.html(
                 """
                 <div class="result-empty">
                     <div class="result-placeholder">01</div>
                     <strong>Your results will appear here</strong>
-                    <p>Upload a leaf image and run the prediction.</p>
+                    <p>Upload a leaf image and click detect to run inference.</p>
                     <div class="result-feature">
                         <span>✓</span>
                         38 plant disease and health categories
                     </div>
                     <div class="result-feature">
                         <span>✓</span>
-                        MobileNetV2 deep learning model
+                        Side-by-side comparison across all 3 models
                     </div>
                 </div>
                 """
             )
         else:
-            predicted_class = (
-                str(result["predicted_class"])
-                .replace("___", " — ")
-                .replace("_", " ")
+            view_mode = st.radio(
+                "Display Mode",
+                ["Selected Model", "Compare All 3 Models"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="view_mode_toggle",
             )
-            safe_class = html.escape(predicted_class)
-            confidence = float(result["confidence"])
-            bar_width = min(100.0, max(0.0, confidence))
 
-            st.html(
-                f"""
-                <div class="result-content">
-                    <div class="result-symbol">✓</div>
-                    <span class="result-overline">PREDICTED CLASS</span>
-                    <div class="prediction-name">{safe_class}</div>
-                    <div class="confidence-row">
-                        <span>Model confidence</span>
-                        <strong>{confidence:.2f}%</strong>
+            if view_mode == "Selected Model":
+                res = all_preds[selected_model]
+                predicted_class = (
+                    str(res["predicted_class"])
+                    .replace("___", " — ")
+                    .replace("_", " ")
+                )
+                safe_class = html.escape(predicted_class)
+                confidence = float(res["confidence"])
+                bar_width = min(100.0, max(0.0, confidence))
+                used_model_name = html.escape(str(res["model_used"]))
+
+                st.html(
+                    f"""
+                    <div class="result-content">
+                        <div class="result-symbol">✓</div>
+                        <span class="result-overline">PREDICTED CLASS</span>
+                        <div class="prediction-name">{safe_class}</div>
+                        <div class="model-badge">Architecture: {used_model_name}</div>
+                        <div class="confidence-row">
+                            <span>Model confidence</span>
+                            <strong>{confidence:.2f}%</strong>
+                        </div>
+                        <div class="confidence-track">
+                            <div class="confidence-fill"
+                                 style="width: {bar_width:.2f}%;"></div>
+                        </div>
+                        <p class="disclaimer">
+                            This is a model prediction, not a confirmed diagnosis.
+                            Accuracy may vary on real-world leaf photographs.
+                        </p>
                     </div>
-                    <div class="confidence-track">
-                        <div class="confidence-fill"
-                             style="width: {bar_width:.2f}%;"></div>
-                    </div>
-                    <p class="disclaimer">
-                        This is a model prediction, not a confirmed diagnosis.
-                        Accuracy may vary on real-world leaf photographs.
-                    </p>
-                </div>
-                """
-            )
+                    """
+                )
+            else:
+                st.html("<div style='margin-top: 10px;'></div>")
+                for m_name, res in all_preds.items():
+                    pred_cls = (
+                        str(res["predicted_class"])
+                        .replace("___", " — ")
+                        .replace("_", " ")
+                    )
+                    safe_cls = html.escape(pred_cls)
+                    conf = float(res["confidence"])
+                    bar_w = min(100.0, max(0.0, conf))
+
+                    st.html(
+                        f"""
+                        <div class="compare-card">
+                            <div class="compare-title">{m_name}</div>
+                            <div class="compare-pred">{safe_cls}</div>
+                            <div class="confidence-row">
+                                <span>Confidence</span>
+                                <strong>{conf:.2f}%</strong>
+                            </div>
+                            <div class="confidence-track">
+                                <div class="confidence-fill" style="width: {bar_w:.2f}%;"></div>
+                            </div>
+                        </div>
+                        """
+                    )
 
             if st.button(
                 "Analyze another image",
                 key="another_image_button",
             ):
-                st.session_state.prediction = None
+                st.session_state.predictions_all = None
                 st.session_state.prediction_file = None
                 st.session_state.upload_version += 1
                 st.rerun()
